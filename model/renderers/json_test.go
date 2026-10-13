@@ -1,6 +1,8 @@
 package renderers
 
 import (
+	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -341,5 +343,31 @@ func TestMarshalWithSpaces(t *testing.T) {
 				t.Errorf("mismatch (-got +want):\n%s", diff)
 			}
 		})
+	}
+}
+
+func TestPythonJSON(t *testing.T) {
+	for _, tt := range []struct {
+		input  any
+		indent int
+		want   string
+	}{
+		{json.RawMessage(`{"z":1e6,"a":[-0,1E2,1e-5,1e999,9007199254740993]}`), 0, `{"z": 1000000.0, "a": [0, 100.0, 1e-05, Infinity, 9007199254740993]}`},
+		{json.RawMessage(`"caf\u00e9 \u003c\u0026\u003e \u001f\b \u2028\u2029 \\u2028"`), 0, "\"café <&> \\u001f\\b \u2028\u2029 \\\\u2028\""},
+		{json.RawMessage(`{"z":{},"a":[1.0,[]]}`), 2, "{\n  \"z\": {},\n  \"a\": [\n    1.0,\n    []\n  ]\n}"},
+	} {
+		got, err := PythonJSON(tt.input, tt.indent)
+		if err != nil || got != tt.want {
+			t.Errorf("PythonJSON(%s, %d) = %q, %v; want %q", tt.input, tt.indent, got, err, tt.want)
+		}
+	}
+	if got, err := PythonJSONCompact(map[string]any{"z": json.Number("1e6"), "a": []any{"x", nil}}); err != nil || got != `{"a":["x",null],"z":1000000.0}` {
+		t.Errorf("PythonJSONCompact = %q, %v", got, err)
+	}
+	for _, depth := range []int{maxPythonJSONDepth, maxPythonJSONDepth + 1} {
+		_, err := PythonJSON(json.RawMessage(strings.Repeat("[", depth)+"0"+strings.Repeat("]", depth)), 2)
+		if (err == nil) != (depth <= maxPythonJSONDepth) {
+			t.Errorf("nesting %d: %v", depth, err)
+		}
 	}
 }
