@@ -972,23 +972,11 @@ func RunHandler(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	audioCapable := slices.Contains(info.Capabilities, model.CapabilityAudio)
-	opts.MultiModal = slices.Contains(info.Capabilities, model.CapabilityVision) || audioCapable
-
-	// TODO: remove the projector info and vision info checks below,
-	// these are left in for backwards compatibility with older servers
-	// that don't have the capabilities field in the model info
-	if len(info.ProjectorInfo) != 0 {
-		opts.MultiModal = true
-	}
-	for k := range info.ModelInfo {
-		if strings.Contains(k, ".vision.") {
-			opts.MultiModal = true
-			break
-		}
-	}
-
 	applyShowResponseToRunOptions(&opts, info)
+
+	if slices.Contains(info.Capabilities, model.CapabilityDecision) {
+		return runDecision(cmd, opts, interactive)
+	}
 
 	// Check if this is an embedding model
 	isEmbeddingModel := slices.Contains(info.Capabilities, model.CapabilityEmbedding)
@@ -1824,6 +1812,8 @@ type runOptions struct {
 	Think          *api.ThinkValue
 	HideThinking   bool
 	ShowConnect    bool
+	Decision       bool
+	Questions      *api.SystemOneQuestions
 }
 
 func (r runOptions) Copy() runOptions {
@@ -1876,12 +1866,27 @@ func (r runOptions) Copy() runOptions {
 		Think:          think,
 		HideThinking:   r.HideThinking,
 		ShowConnect:    r.ShowConnect,
+		Decision:       r.Decision,
+		Questions:      r.Questions,
 	}
 }
 
 func applyShowResponseToRunOptions(opts *runOptions, info *api.ShowResponse) {
 	opts.ParentModel = info.Details.ParentModel
 	opts.LoadedMessages = slices.Clone(info.Messages)
+	opts.MultiModal = slices.Contains(info.Capabilities, model.CapabilityVision) ||
+		slices.Contains(info.Capabilities, model.CapabilityAudio)
+
+	// Keep media input working with older servers that do not report capabilities.
+	if len(info.ProjectorInfo) != 0 {
+		opts.MultiModal = true
+	}
+	for key := range info.ModelInfo {
+		if strings.Contains(key, ".vision.") {
+			opts.MultiModal = true
+			break
+		}
+	}
 }
 
 type displayResponseState struct {
@@ -2363,18 +2368,6 @@ func launchInteractiveModel(cmd *cobra.Command, modelName string) error {
 		return err
 	}
 
-	audioCapable := slices.Contains(info.Capabilities, model.CapabilityAudio)
-	opts.MultiModal = slices.Contains(info.Capabilities, model.CapabilityVision) || audioCapable
-	if len(info.ProjectorInfo) != 0 {
-		opts.MultiModal = true
-	}
-	for key := range info.ModelInfo {
-		if strings.Contains(key, ".vision.") {
-			opts.MultiModal = true
-			break
-		}
-	}
-
 	applyShowResponseToRunOptions(&opts, info)
 
 	if err := loadOrUnloadModel(cmd, &opts); err != nil {
@@ -2571,8 +2564,18 @@ func NewCLI() *cobra.Command {
 	showCmd.Flags().BoolP("verbose", "v", false, "Show detailed model information")
 
 	runCmd := &cobra.Command{
-		Use:     "run MODEL [PROMPT]",
-		Short:   "Run a model",
+		Use:   "run MODEL [PROMPT]",
+		Short: "Run a model",
+		Example: `  ollama run gemma4
+  ollama run gemma4 "Why is the sky blue?"
+  ollama run nimble --ask "Is a refund being requested?" < ticket.txt
+  ollama run nimble --ask "Which team should handle this?" \
+    --choice billing="Payments and refunds" \
+    --choice technical="Software problems" < ticket.txt
+  ollama run nimble --ask "How urgent is this?" \
+    --level "Routine" \
+    --level "Soon" \
+    --level "Immediate" < ticket.txt`,
 		Args:    cobra.MinimumNArgs(1),
 		PreRunE: checkServerHeartbeat,
 		RunE:    RunHandler,
@@ -2590,6 +2593,10 @@ func NewCLI() *cobra.Command {
 	runCmd.Flags().Bool("hidethinking", false, "Hide thinking output (if provided)")
 	runCmd.Flags().Bool("truncate", false, "For embedding models: truncate inputs exceeding context length (default: true). Set --truncate=false to error instead")
 	runCmd.Flags().Int("dimensions", 0, "Truncate output embeddings to specified dimension (embedding models only)")
+	var asked []askedQuestion
+	runCmd.Flags().Var(questionFlag{"ask", &asked}, "ask", "Ask a decision model a question, answered yes or no unless --choice or --level follow")
+	runCmd.Flags().Var(questionFlag{"choice", &asked}, "choice", `Add a label for the preceding --ask to choose from, e.g. billing="Payments and refunds"`)
+	runCmd.Flags().Var(questionFlag{"level", &asked}, "level", "Add a level to score the preceding --ask on, from lowest to highest")
 
 	stopCmd := &cobra.Command{
 		Use:     "stop MODEL",
